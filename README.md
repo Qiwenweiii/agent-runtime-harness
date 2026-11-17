@@ -1,153 +1,83 @@
-# agent-runtime — 极简 Agent Runtime
+# Agent Runtime — 从零手搓的轻量级执行引擎
 
-一个从零手写的最小 Agent 运行时：不依赖 LangChain / LangGraph 等框架，只用 OpenAI SDK 的 chat + function calling，靠「模型调用 → 工具执行 → 结果回喂」的循环跑通 Agent 核心机制，并逐版本叠加权限控制、Skill 装配、MCP 协议接入与 HITL 人工审批。
+一个不依赖 `LangChain` / `LangGraph` 等任何框架，仅使用原生 `OpenAI SDK` 与 Python 标准库从零实现的 Agent 底层执行引擎。
 
-依赖只有 `openai` 与 `python-dotenv`，其余全是标准库；`src/runtime` 十个文件、不足 1000 行，适合用来搞清楚框架到底替你封装掉了什么。
+本项目旨在剥离框架的黑盒，探索大模型 Tool Calling 的底层机制。代码规模极简（10 个文件，<1000 行），但完整实现了**权限拦截、MCP 协议集成、HITL 中断恢复与 Trace 审计**，具备生产级 Agent 底座的雏形。
 
-## 版本演进
+## 💡 为什么会有这个项目？
+在使用高层框架时，Agent 的执行循环、状态挂起、协议解析都被封装在底层。为了真正掌控大模型的执行边界（特别是高危工具调用的安全兜底），本项目选择“造轮子”，从 `chat + tool_calls` 的最简循环跑通，逐步叠加上真实的工程级护栏。
 
-每一版只解决上一版暴露出来的问题。
+## ✨ 核心特性
 
-| 版本 | 新增能力                                                                      |
-| ---- | ------------------------------------------------------------------------------- |
-| v0   | 50 行单文件：chat + tool_calls 循环，验证「模型驱动循环」最小可行             |
-| v1   | Agent 主循环（chat + function calling）                                       |
-| v2   | 工具注册表、risk 声明（readonly / write）                                     |
-| v3   | 权限拦截：write 工具直接 deny 并把原因回喂                                    |
-| v4   | Skill 装配：system prompt + 工具白名单 + plan_mode                            |
-| v5   | MCP 支持：stdio 子进程 JSON-RPC，远程工具透明注册                             |
-| v6   | HITL 暂停与恢复：write 工具挂起落库，`--resume` 人工审批后续跑                |
-| v7   | Trace 按 session_id 聚合：一次业务生命周期（含审批恢复）写入同一个 trace 文件 |
+- **极简依赖**：仅依赖 `openai` 与 `python-dotenv`，其余全部基于 Python 标准库。
+- **原生 Function Calling**：从零解析工具调用、执行并回喂结果，拒绝黑盒。
+- **细粒度权限管控**：基于 `ToolSpec` 的风险分级（readonly/write），结合 `plan_mode` 实现高危拦截。
+- **MCP 协议无缝接入**：通过 stdio 收发 `JSON-RPC 2.0`，将外部 MCP Server 的工具透明注册为本地 `ToolSpec`，实现跨进程调度。
+- **HITL 跨进程恢复**：高危写操作触发挂起并落库（SQLite），支持通过 `--resume` 恢复上下文并人工审批，防止 Agent 失控。
+- **全链路 Trace 审计**：按 `session_id` 聚合生命周期日志，包含审批挂起与恢复，提供完整的执行追踪证据。
 
-## 目录结构
+## 🏗️ 架构与模块职责
 
-```
+```text
 src/runtime/
-├── main.py            # 入口：CLI 参数、Agent 循环、HITL 挂起/恢复
-├── tools.py           # ToolSpec 与工具注册表（name -> ToolSpec）
-├── tools_impl.py      # 本地演示工具（get_service_status / get_recent_logs / restart_service）
-├── permissions.py     # check_permission：按 risk + plan_mode 判定 allow/deny
-├── parsing.py         # parse_tool_args：参数串安全解析，绝不抛异常
-├── skill.py           # Skill 加载：system prompt + allowed_tools + plan_mode
-├── skills/            # Skill 定义（json）
-├── mcp_client.py      # MCP 客户端：以子进程 stdio 收发 JSON-RPC 2.0
-├── mcp_server.py      # 演示用 MCP server（暴露 get_pod_events）
-├── session_store.py   # HITL 会话状态存储：标准库 sqlite3
-└── runtime_trace.py   # jsonl 事件 trace，按 session_id 聚合文件名
-tests/                 # 离线单测：mock 模型客户端，全程不发网络请求
+├── main.py            # 核心入口：Agent 循环、HITL 挂起与恢复逻辑
+├── tools.py           # ToolSpec 契约定义与工具注册表
+├── permissions.py     # 权限引擎：基于 risk 与 plan_mode 的 allow/deny 判定
+├── mcp_client.py      # MCP 客户端：stdio 子进程与 JSON-RPC 通信
+├── mcp_server.py      # 本地 MCP Server 演示：对外暴露工具
+├── session_store.py   # 状态恢复：基于 sqlite3 持久化挂起会话
+└── runtime_trace.py   # 审计日志：JSONL 格式的事件流记录
 ```
 
-运行时产物不进仓库：`sessions.db`（HITL 会话状态）、`traces/*.jsonl`（事件日志）、`.env`（模型配置）都已在 `.gitignore` 中。
-
-## 快速开始
+## 🚀 快速启动
 
 ```bash
 # 1. 安装依赖
 uv sync
 
-# 2. 配置模型：复制 .env.example 为 .env 后填写
+# 2. 配置模型环境变量
 cp .env.example .env
+# 填入 OPENAI_API_KEY, OPENAI_MODEL (及可选的 OPENAI_BASE_URL)
 
-# 3. 运行（启动后输入一句用户需求）
+# 3. 启动 CLI 交互
 uv run --no-sync python src/runtime/main.py
-uv run --no-sync python src/runtime/main.py --plan-mode           # 计划模式：write 全部直接拒绝
-uv run --no-sync python src/runtime/main.py --skill status_check  # 换一套 Skill（工具白名单 + system prompt）
-uv run --no-sync python src/runtime/main.py --resume {session_id} # 审批并恢复挂起的会话
 ```
 
-触发挂起后终端会打印 `session_id`；可用 sqlite3 查看会话状态：
-
+### 高阶运行模式
 ```bash
-sqlite3 sessions.db "SELECT session_id, status FROM sessions;"
+# 计划模式：所有 write 工具（如重启服务）将被直接拒绝
+uv run --no-sync python src/runtime/main.py --plan-mode
+
+# 技能装配：指定 system prompt 与工具白名单
+uv run --no-sync python src/runtime/main.py --skill status_check
+
+# 人工审批恢复：高危操作挂起后，使用指定 session_id 续跑
+uv run --no-sync python src/runtime/main.py --resume {session_id}
 ```
 
-### 环境变量
+## 🧠 核心机制解析
 
-| 变量              | 必填 | 说明                                         |
-| ----------------- | ---- | ---------------------------------------------- |
-| `OPENAI_API_KEY`  | 是   | 模型接入密钥                                 |
-| `OPENAI_BASE_URL` | 否   | OpenAI 兼容端点（换国产模型 / 自建网关时填） |
-| `OPENAI_MODEL`    | 是   | 模型名，需支持 function calling              |
+### 1. 权限与 MCP 统一管控
+无论是本地演示工具还是通过 MCP 动态发现的外部工具，在注册时都会统一转换为 `ToolSpec`。
+`check_permission` 引擎会基于工具的 `risk` 属性进行裁决：
+- `readonly`：直接放行。
+- `write` + `plan_mode`：直接拒绝（deny），并将拒绝原因回喂给大模型。
+- `write` + 非 `plan_mode`：触发 `needs_human_review`，进入 HITL 挂起流程。
 
-### CLI 参数
+### 2. 跨进程 HITL (Human-in-the-Loop)
+由于写操作需人工确认，进程不可一直阻塞。命中审批时，引擎会将 `messages`、`step`、`pending_tool_call` 及后续未执行的 `remaining` 调用快照序列化存入 SQLite。
+用户通过 CLI 恢复时，系统重建上下文，展示待审操作，批准后执行并继续主循环，确保多轮消息合法性与状态一致性。
 
-| 参数          | 默认                | 说明                                             |
-| ------------- | ------------------- | -------------------------------------------------- |
-| `--skill`     | `incident_response` | 加载 `src/runtime/skills/{skill}.json`           |
-| `--plan-mode` | `false`             | 计划模式，拒绝所有 write 工具                    |
-| `--max-steps` | `5`                 | Agent 循环上限，超限记 `max_steps_exceeded` 结束 |
-| `--resume`    | 无                  | 传入 session_id 恢复 pending 会话并走人工审批    |
+### 3. 结构化 Trace 审计
+运行事件追加写入 `traces/trace_{session_id}.jsonl`。事件节点包括 `run_start`、`model_call`、`tool_call`、`hitl_pause` 等。通过 `session_id` 聚合，使得挂起前后的执行链路被串联在同一条时间线上，方便排障与合规回溯。
 
-## 核心机制
-
-### Agent 循环
-
-`run_agent` 每轮调模型：有 `tool_calls` 就逐个执行并以 `role="tool"` 回喂结果；没有工具调用即视为最终回答并结束。`start_step` 让 HITL 恢复时从挂起步的下一步续跑，而不是从第 1 步重来。
-
-### 权限模型
-
-`check_permission(spec, plan_mode)` 只看两点：工具自己声明的 `risk`，和当前是否 plan_mode。
-
-| 场景                        | 结果                                                |
-| --------------------------- | ----------------------------------------------------- |
-| `risk=readonly`             | allow，直接执行                                     |
-| `risk=write` + plan_mode    | deny（reason=`plan_mode`），拒绝原因回喂模型        |
-| `risk=write` + 非 plan_mode | deny（reason=`needs_human_review`）→ 触发 HITL 挂起 |
-
-本地工具与 MCP 工具走同一套判定，远程工具不会因为来源不同而绕过权限。
-
-### HITL：跨进程暂停与恢复
-
-写操作要人审，但人不可能一直等在进程里，所以把循环状态快照落库、进程退出，由人另行发起恢复：
-
-1. 命中 `needs_human_review` 时，把 `messages / step / pending_tool_call / skill_config / plan_mode / max_steps` 序列化存入 `sessions.db`（status=pending），进程退出。
-2. 同一轮里排在后面、还没执行的 tool_calls 一并记入 `pending_tool_call.remaining`——否则恢复后 assistant 与 tool 消息配对不合法。
-3. `--resume {session_id}` 读回状态，终端 y/n 审批：批准则执行挂起工具并补跑 remaining，拒绝则把「用户拒绝了该操作」回喂；随后接回主循环续跑。
-
-### Skill 装配
-
-Skill 是一份 JSON 声明：`system_prompt`（角色与约束）、`allowed_tools`（模型可见工具白名单）、`plan_mode`（是否强制只读）。Skill 声明 `plan_mode: true` 时强制生效，命令行参数只能加严、不能放宽。内置两个示例：`incident_response`（允许请求重启，走人审）与 `status_check`（纯只读排障）。
-
-### MCP 接入
-
-启动时以子进程拉起 `mcp_server.py`，通过 stdio 交换单行 JSON-RPC 2.0 消息：`tools/list` 返回的工具被包装成本地 `ToolSpec`（`func` 是闭包，调用时转发 `tools/call`），因此远程工具与本地工具在注册表、权限、trace 三条路径上完全一致。退出前用 `finally` 关闭子进程，避免工具调用打到已退出的 server。
-
-### Trace 审计
-
-`traces/trace_{session_id}.jsonl` 追加写，一行一个事件，统一带 ISO 时间戳。工具调用事件用 `status` 区分四种结果：`success` / `tool_error` / `denied` / `parse_error`，并记录 `risk`、拒绝 `reason`、来源 `source`。因为文件名由 session_id 决定，暂停与恢复落在同一个文件里，一次业务生命周期就是可完整审计的一条线：
-
-```
-run_start → model_call → tool_call → hitl_pause
-→ run_start(resumed) → tool_call → model_call → final_answer
-```
-
-结果与内容统一截断到 200 字符，避免大段日志把 trace 文件撑爆。
-
-## 内置工具
-
-| 工具                 | 来源 | risk     | 说明                             |
-| -------------------- | ---- | -------- | ---------------------------------- |
-| `get_service_status` | 本地 | readonly | 返回模拟的服务运行状态           |
-| `get_recent_logs`    | 本地 | readonly | 返回模拟的最近日志               |
-| `restart_service`    | 本地 | write    | 模拟重启，专门用来触发权限与人审 |
-| `get_pod_events`     | MCP  | readonly | 由 MCP server 提供，返回 Pod 事件 |
-
-## 测试
-
+## 🧪 测试保障
 ```bash
 uv run --no-sync pytest
 ```
+包含全链路离线单测：使用 `Mock` 模型客户端，绝不发起真实网络请求，覆盖主循环逻辑、HITL 挂起恢复、参数安全解析与权限判定。
 
-单测全程离线：`tests/helpers.py` 构造 OpenAI SDK 的消息对象与按脚本返回响应的 mock 客户端，`tests/conftest.py` 把工具注册表、trace 目录、`sessions.db` 各自隔离到临时路径，因此跑测试不会污染项目根的真实产物。覆盖 Agent 主循环、HITL 挂起与恢复、参数安全解析、权限判定。
-
-## 文档
-
-- [docs/architecture.md](docs/architecture.md) — 数据流主线、五条撑起设计的约定、模块职责分工、一次 HITL 的跨进程时序、离线验证方法与已知短板
-
-## 已知局限
-
-- 工具注册表是进程内单例 dict，没有会话级隔离，也没有并发安全。
-- MCP 只有 stdio 传输，未实现完整生命周期与流式通知。
-- HITL 审批只有一个终端 y/n，没有多用户、审批超时与拒绝后的重试策略。
-- Skill 只吃 JSON，暂不支持行业标准的 `SKILL.md` 格式与按需渐进加载。
-- 未处理上下文长度管理、失败重试与成本统计；会话状态没有过期清理；权限判定只看 risk 与 plan_mode，没有资源级授权。
+## ⚠️ 已知局限与演进规划
+- **单机单例**：当前工具注册表与状态管理为进程内单例，未来可向会话级隔离与并发安全演进。
+- **传输协议**：MCP 当前仅实现 stdio 传输，计划补齐 SSE 及流式通知。
+- **上下文管理**：暂未处理长上下文截断、Token 成本统计，属于 V1.0 之后的进阶功能。
