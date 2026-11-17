@@ -1,0 +1,29 @@
+[project]
+name = "agent-runtime"
+version = "0.1.0"
+description = "Minimal agent runtime written from scratch: agent loop, permission gate, skill assembly, MCP, and HITL approval"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=3.35.1",
+    "python-dotenv>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.1",
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src/runtime"]
+
+[tool.ruff.lint]
+# 模型输出与工具执行都是不可信外部输入：解析失败/工具异常是业务分支而非程序错误，
+# 因此边界处刻意裸捕 Exception 并归入 tool_error / parse_error 回喂，不让循环中断
+ignore = ["BLE001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["runtime", "runtime_trace", "tools", "tools_impl", "mcp_client", "mcp_server"]

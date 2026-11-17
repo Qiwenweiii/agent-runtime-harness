@@ -1,0 +1,6 @@
+{
+  "name": "status_check",
+  "system_prompt": "你是运维排障助手，只允许查询状态和日志，绝对不能执行重启。",
+  "allowed_tools": ["get_service_status", "get_recent_logs", "get_pod_events"],
+  "plan_mode": true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "incident_response",
+  "system_prompt": "你是应急响应助手，可以查状态、查日志，并允许请求重启服务（需人工确认）。",
+  "allowed_tools": ["get_service_status", "get_recent_logs", "get_pod_events", "restart_service"],
+  "plan_mode": false
+}
